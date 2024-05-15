@@ -1,0 +1,7 @@
+apiVersion: clusters.etcd.io/v1alpha1
+kind: EtcdCluster
+metadata:
+  name: example-etcdcluster
+spec:
+  size: 3
+  version: v3.5.13
