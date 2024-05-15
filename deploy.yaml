@@ -1,0 +1,57 @@
+kind: ServiceAccount
+apiVersion: v1
+metadata:
+  name: etcd-operator-sa
+  namespace: default
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: etcd-operator-role
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["clusters.etcd.io"]
+    resources: ["etcdclusters"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: etcd-operator-role-binding
+subjects:
+  - kind: ServiceAccount
+    name: etcd-operator-sa
+    namespace: default
+roleRef:
+  kind: ClusterRole
+  name: etcd-operator-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: etcd-operator
+  labels:
+    app: etcd-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: etcd-operator
+  template:
+    metadata:
+      labels:
+        app: etcd-operator
+    spec:
+      serviceAccountName: etcd-operator-sa
+      containers:
+      - name: etcd-operator
+        image: gcr.io/etcd-development/etcd-operator:v0.1.0

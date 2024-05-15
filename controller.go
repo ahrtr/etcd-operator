@@ -499,7 +499,8 @@ func newStatefulsets(ec *ecv1alpha1.EtcdCluster, replica int32) *appsv1.Stateful
 			},
 		},
 		Spec: appsv1.StatefulSetSpec{
-			Replicas: &replica,
+			Replicas:    &replica,
+			ServiceName: ec.Name,
 			Selector: &metav1.LabelSelector{
 				MatchLabels: labels,
 			},
@@ -545,6 +546,16 @@ func newStatefulsets(ec *ecv1alpha1.EtcdCluster, replica int32) *appsv1.Stateful
 											Name: configMapNameForEtcdCluster(ec),
 										},
 									},
+								},
+							},
+							Ports: []corev1.ContainerPort{
+								{
+									Name:          "client",
+									ContainerPort: 2379,
+								},
+								{
+									Name:          "peer",
+									ContainerPort: 2380,
 								},
 							},
 						},
