@@ -19,12 +19,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"go.uber.org/zap"
 
-	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	"go.etcd.io/etcd/client/pkg/v3/logutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -56,11 +57,35 @@ type epHealth struct {
 	Ep     string `json:"endpoint"`
 	Health bool   `json:"health"`
 	Took   string `json:"took"`
+	Status *clientv3.StatusResponse
 	Error  string `json:"error,omitempty"`
 }
 
+type healthReport []epHealth
+
+func (r healthReport) Len() int {
+	return len(r)
+}
+
+func (r healthReport) Swap(i, j int) {
+	r[i], r[j] = r[j], r[i]
+}
+
+func (r healthReport) Less(i, j int) bool {
+	return r[i].Ep < r[j].Ep
+}
+
 func (eh epHealth) String() string {
-	return fmt.Sprintf("endpoint: %s, health: %t, took: %s, error: %s", eh.Ep, eh.Health, eh.Took, eh.Error)
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("endpoint: %s, health: %t, took: %s", eh.Ep, eh.Health, eh.Took))
+	if eh.Status != nil {
+		sb.WriteString(fmt.Sprintf(", isLearner: %t", eh.Status.IsLearner))
+	}
+	if len(eh.Error) > 0 {
+		sb.WriteString("error: ")
+		sb.WriteString(eh.Error)
+	}
+	return sb.String()
 }
 
 func clusterHealth(eps []string) ([]epHealth, error) {
@@ -100,7 +125,7 @@ func clusterHealth(eps []string) ([]epHealth, error) {
 			// get a random key. As long as we can get the response
 			// without an error, the endpoint is health.
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			_, err = cli.Get(ctx, "health")
+			_, err = cli.Get(ctx, "health", clientv3.WithSerializable())
 			eh := epHealth{Ep: ep, Health: false, Took: time.Since(startTs).String()}
 			if err == nil || err == rpctypes.ErrPermissionDenied {
 				eh.Health = true
@@ -109,26 +134,16 @@ func clusterHealth(eps []string) ([]epHealth, error) {
 			}
 
 			if eh.Health {
-				resp, err := cli.AlarmList(ctx)
-				if err == nil && len(resp.Alarms) > 0 {
+				epStatus, err := cli.Status(ctx, ep)
+				if err != nil {
 					eh.Health = false
-					eh.Error = "Active Alarm(s): "
-					for _, v := range resp.Alarms {
-						switch v.Alarm {
-						case etcdserverpb.AlarmType_NOSPACE:
-							// We ignore AlarmType_NOSPACE, and we need to
-							// continue to perform defragmentation.
-							eh.Health = true
-							eh.Error = eh.Error + "NOSPACE "
-						case etcdserverpb.AlarmType_CORRUPT:
-							eh.Error = eh.Error + "CORRUPT "
-						default:
-							eh.Error = eh.Error + "UNKNOWN "
-						}
+					eh.Error = "Unable to fetch the status"
+				} else {
+					eh.Status = epStatus
+					if len(epStatus.Errors) > 0 {
+						eh.Health = false
+						eh.Error = strings.Join(epStatus.Errors, ",")
 					}
-				} else if err != nil {
-					eh.Health = false
-					eh.Error = "Unable to fetch the alarm list"
 				}
 			}
 			cancel()
@@ -142,6 +157,7 @@ func clusterHealth(eps []string) ([]epHealth, error) {
 	for h := range healthCh {
 		healthList = append(healthList, h)
 	}
+	sort.Sort(healthReport(healthList))
 
 	return healthList, nil
 }

@@ -288,7 +288,7 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 		return fmt.Errorf("%s", msg)
 	}
 
-	memberListResp, err := healthCheck(ec, sts, logger)
+	memberListResp, healthInfos, err := healthCheck(ec, sts, logger)
 	if err != nil {
 		return fmt.Errorf("health check failed: %w", err)
 	}
@@ -314,23 +314,18 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 		// return
 	}
 
+	if memberCnt != len(healthInfos) {
+		return fmt.Errorf("memberCnt (%d) isn't equal to healthy member count (%d)", memberCnt, len(healthInfos))
+	}
 	// There should be at most one learner, namely the last one
-	if memberCnt > 0 && memberListResp.Members[memberCnt-1].IsLearner {
+	if memberCnt > 0 && healthInfos[memberCnt-1].Status.IsLearner {
 		logger = logger.WithValues("replica", replica, "expectedSize", ec.Spec.Size)
 
-		learnerEp := clientEndpointForOrdinalIndex(sts, memberCnt-1)
-		learnerStatus, err := memberStatus(learnerEp)
-		if err != nil {
-			return err
-		}
+		learnerStatus := healthInfos[memberCnt-1].Status
 
 		var leaderStatus *clientv3.StatusResponse
 		for i := 0; i < memberCnt-1; i++ {
-			ep := clientEndpointForOrdinalIndex(sts, i)
-			status, err := memberStatus(ep)
-			if err != nil {
-				return err
-			}
+			status := healthInfos[i].Status
 			if status.Leader == status.Header.MemberId {
 				leaderStatus = status
 				break
@@ -341,7 +336,7 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 			return fmt.Errorf("couldn't find leader, memberCnt: %d", memberCnt)
 		}
 
-		learnerID := memberListResp.Members[memberCnt-1].ID
+		learnerID := healthInfos[memberCnt-1].Status.Header.MemberId
 		if isLearnerReady(leaderStatus, learnerStatus) {
 			logger.Info("Promoting the learner member", "learnerID", learnerID)
 			eps := clientEndpointsFromStatefulsets(sts)
@@ -409,17 +404,17 @@ func isLearnerReady(leaderStatus, learnerStatus *clientv3.StatusResponse) bool {
 // healthCheck returns a memberList and an error.
 // If any member (excluding not yet started or already removed member)
 // is unhealthy, the error won't be nil.
-func healthCheck(ec *ecv1alpha1.EtcdCluster, sts *appsv1.StatefulSet, lg klog.Logger) (*clientv3.MemberListResponse, error) {
+func healthCheck(ec *ecv1alpha1.EtcdCluster, sts *appsv1.StatefulSet, lg klog.Logger) (*clientv3.MemberListResponse, []epHealth, error) {
 	replica := int(*sts.Spec.Replicas)
 	if replica == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	endpoints := clientEndpointsFromStatefulsets(sts)
 
 	memberlistResp, err := memberList(endpoints)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	memberCnt := len(memberlistResp.Members)
 
@@ -435,18 +430,18 @@ func healthCheck(ec *ecv1alpha1.EtcdCluster, sts *appsv1.StatefulSet, lg klog.Lo
 
 	healthInfos, err := clusterHealth(endpoints)
 	if err != nil {
-		return memberlistResp, err
+		return memberlistResp, nil, err
 	}
 
 	for _, healthInfo := range healthInfos {
 		if !healthInfo.Health {
 			// TODO: also update metrics?
-			return memberlistResp, fmt.Errorf(healthInfo.String())
+			return memberlistResp, healthInfos, fmt.Errorf(healthInfo.String())
 		}
 		lg.Info(healthInfo.String())
 	}
 
-	return memberlistResp, nil
+	return memberlistResp, healthInfos, nil
 }
 
 func clientEndpointsFromStatefulsets(sts *appsv1.StatefulSet) []string {
