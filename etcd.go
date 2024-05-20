@@ -232,3 +232,26 @@ func promoteLearner(eps []string, learnerId uint64) error {
 	_, err = c.MemberPromote(ctx, learnerId)
 	return err
 }
+
+func removeMember(eps []string, memberID uint64) error {
+	cfg := clientv3.Config{
+		Endpoints:            eps,
+		DialTimeout:          2 * time.Second,
+		DialKeepAliveTime:    2 * time.Second,
+		DialKeepAliveTimeout: 6 * time.Second,
+	}
+
+	c, err := clientv3.New(cfg)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer func() {
+		c.Close()
+		cancel()
+	}()
+
+	_, err = c.MemberRemove(ctx, memberID)
+	return err
+}

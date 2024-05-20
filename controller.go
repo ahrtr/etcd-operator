@@ -340,6 +340,7 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 		if isLearnerReady(leaderStatus, learnerStatus) {
 			logger.Info("Promoting the learner member", "learnerID", learnerID)
 			eps := clientEndpointsFromStatefulsets(sts)
+			eps = eps[:(len(eps) - 1)]
 			return promoteLearner(eps, learnerID)
 		}
 
@@ -350,43 +351,56 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 
 	expectedSize := ec.Spec.Size
 	if replica == expectedSize {
+		// TODO: check version change, and perform upgrade if needed.
 		return nil
 	}
 
+	var targetReplica int32
 	if replica < expectedSize {
 		// scale out
-		targetReplica := int32(replica + 1)
-
+		targetReplica = int32(replica + 1)
 		logger = logger.WithValues("targetReplica", targetReplica, "expectedSize", ec.Spec.Size)
 
 		// TODO: check PV & PVC for the new member. If they already exist,
 		// then it means they haven't been cleaned up yet when scaling in.
 
-		logger.Info("Applying etcd cluster state")
-		if err := c.applyEtcdClusterState(ec, int(targetReplica)); err != nil {
-			return err
-		}
-
+		_, peerURL := peerEndpointForOrdinalIndex(ec, replica)
 		if replica > 0 {
 			// if replica == 0, then it's the very first member, then
 			// there is no need to add it as a learner; instead we can
 			// start it as a voting member directly.
 			eps := clientEndpointsFromStatefulsets(sts)
-			_, peerURL := peerEndpointForOrdinalIndex(ec, replica)
-			logger.Info("Adding a new learner member", "peerURLs", peerURL)
+			logger.Info("[Scale out] adding a new learner member", "peerURLs", peerURL)
 			if _, err := addMember(eps, []string{peerURL}, true); err != nil {
 				return err
 			}
-		}
-
-		logger.Info("Updating statefulsets")
-		sts, err = c.kubeClientset.AppsV1().StatefulSets(ec.Namespace).Update(context.TODO(), newStatefulsets(ec, targetReplica), metav1.UpdateOptions{})
-		if err != nil {
-			return err
+		} else {
+			logger.Info("[Scale out] Starting the very first voting member", "peerURLs", peerURL)
 		}
 	} else {
 		// scale in
-		// TODO: tbd...
+		targetReplica = int32(replica - 1)
+		logger = logger.WithValues("targetReplica", targetReplica, "expectedSize", ec.Spec.Size)
+
+		memberID := healthInfos[memberCnt-1].Status.Header.MemberId
+
+		logger.Info("[Scale in] removing one member", "memberID", memberID)
+		eps := clientEndpointsFromStatefulsets(sts)
+		eps = eps[:targetReplica]
+		if err := removeMember(eps, memberID); err != nil {
+			return err
+		}
+	}
+
+	logger.Info("Applying etcd cluster state")
+	if err := c.applyEtcdClusterState(ec, int(targetReplica)); err != nil {
+		return err
+	}
+
+	logger.Info("Updating statefulsets")
+	sts, err = c.kubeClientset.AppsV1().StatefulSets(ec.Namespace).Update(context.TODO(), newStatefulsets(ec, targetReplica), metav1.UpdateOptions{})
+	if err != nil {
+		return err
 	}
 
 	c.recorder.Event(ec, corev1.EventTypeNormal, SuccessSynced, MessageResourceSynced)
